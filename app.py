@@ -280,6 +280,11 @@ def compute_xai_attribution(raw_text: str, tokenizer, model, device: torch.devic
 def batch_predict_df(df: pd.DataFrame, text_col: str, tokenizer, model, device: torch.device, batch_size: int = 16, progress_bar = None) -> pd.DataFrame:
     """Xử lý phân loại hàng loạt trên GPU theo Mini-batches an toàn bộ nhớ (batch_size=16)."""
     df_res = df.copy()
+    if df_res.empty:
+        df_res['Chủ đề dự đoán'] = []
+        df_res['Độ tin cậy (%)'] = []
+        return df_res
+        
     raw_texts = [str(x) if pd.notna(x) else "" for x in df_res[text_col]]
     cleaned_texts = [preprocess_text(t) or t for t in raw_texts]
     
@@ -304,8 +309,8 @@ def batch_predict_df(df: pd.DataFrame, text_col: str, tokenizer, model, device: 
                 pred_labels.append(LABEL_NAMES[idx])
                 pred_confs.append(round(float(probs[j, idx] * 100), 2))
                 
-        if progress_bar:
-            progress_bar.progress(min(1.0, (i + batch_size) / total))
+        if progress_bar and total > 0:
+            progress_bar.progress(min(1.0, (i + len(batch)) / total))
         clear_gpu_memory()
             
     df_res['Chủ đề dự đoán'] = pred_labels
@@ -316,8 +321,10 @@ def batch_predict_df(df: pd.DataFrame, text_col: str, tokenizer, model, device: 
 # 4. GIAO DIỆN CHÍNH (STREAMLIT APP LAYOUT)
 # =============================================================================
 
+device_name = "N/A"
 try:
     tokenizer, model, device = load_engine()
+    device_name = device.type.upper()
     is_ready = True
 except Exception as e:
     is_ready = False
@@ -331,7 +338,7 @@ with st.sidebar:
     st.markdown("---")
     
     st.markdown("#### 💻 Trạng thái phần cứng")
-    st.markdown(f"- **Thiết bị:** `{device.type.upper()}`")
+    st.markdown(f"- **Thiết bị:** `{device_name}`")
     st.markdown(f"- **Kiến trúc:** `PhoBERT-base`")
     st.markdown(f"- **Tham số:** `~135 triệu`")
     st.markdown(f"- **Từ vựng BPE:** `64,000 tokens`")
@@ -499,17 +506,23 @@ with tab2:
     st.markdown("### 🔍 Explainable AI Studio (Trực Quan Hóa Lý Do Quyết Định)")
     st.write("Phương pháp **Leave-One-Out Sensitivity** đo lường chính xác mức độ sụt giảm xác suất khi từng từ bị loại bỏ khỏi câu. Những từ có điểm số đóng góp cao nhất chính là **chứng cứ cốt lõi** mà PhoBERT dựa vào để phân loại.")
     
+    def update_xai_sample():
+        st.session_state["ta_xai"] = SAMPLE_ARTICLES[st.session_state["sb_xai"]]
+
+    if "ta_xai" not in st.session_state:
+        st.session_state["ta_xai"] = SAMPLE_ARTICLES[list(SAMPLE_ARTICLES.keys())[0]]
+
     col_x1, col_x2 = st.columns([1, 1.3], gap="large")
     
     with col_x1:
         xai_sample = st.selectbox(
             "Chọn bài báo mẫu để kiểm tra XAI:",
             options=list(SAMPLE_ARTICLES.keys()),
-            key="sb_xai"
+            key="sb_xai",
+            on_change=update_xai_sample
         )
         xai_text = st.text_area(
             "Văn bản cần giải thích:",
-            value=SAMPLE_ARTICLES[xai_sample],
             height=140,
             key="ta_xai"
         )
