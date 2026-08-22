@@ -1,24 +1,25 @@
 # Data & ML
-pandas==2.1.0
-numpy==1.24.0
-scikit-learn==1.3.0
-joblib==1.3.0
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+joblib>=1.3.0
 
 # Web crawling
-requests==2.31.0
-beautifulsoup4==4.12.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
 
 # Vietnamese NLP
-underthesea==6.8.0
+underthesea>=6.8.0
 
 # Deep Learning (PhoBERT)
-torch==2.0.1
-transformers==4.35.0
-datasets==2.14.0
+torch>=2.2.0
+transformers>=4.38.0
+datasets>=2.14.0
 
 # Visualization
-matplotlib==3.7.0
-seaborn==0.12.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
-# Demo app
-streamlit==1.28.0
+# Demo app & Notebook
+streamlit>=1.28.0
+ipykernel>=6.29.0

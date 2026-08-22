@@ -1,5 +1,5 @@
 # ============================================================
-# TÁI TẠO BIỂU ĐỒ TỪ MODEL ĐÃ TRAIN XONG (không cần train lại)
+# TÁI TẠO BIỂU ĐỒ TỪ MODEL ĐÃ TRAIN XONG (ĐÃ FIX SẠCH LỖI ĐƯỜNG DẪN)
 # ============================================================
 import torch
 import pandas as pd
@@ -13,11 +13,11 @@ from sklearn.metrics import (classification_report, accuracy_score,
                               confusion_matrix, precision_recall_fscore_support)
 import matplotlib.pyplot as plt
 import seaborn as sns
+import unicodedata
+import re
 
-# --- Cấu hình (PHẢI khớp với lúc train) ---
-MODEL_PATH = './phobert_best'      # đường dẫn tới model đã giải nén
-DATA_PATH  = 'data/processed/data_clean.csv'   # cần có lại file data_clean.csv
-MAX_LEN    = 256
+MODEL_PATH = './phobert_best'
+MAX_LEN = 256
 BATCH_SIZE = 32
 
 LABEL_VI = [
@@ -26,125 +26,148 @@ LABEL_VI = [
     'Pháp luật', 'Giáo dục', 'Đời sống',
 ]
 
+STOPWORDS = set([
+    'và','của','là','các','để','với','trong','cho','về','từ',
+    'có','được','này','đã','không','một','những','theo','ra',
+    'đó','thì','trên','mà','khi','đến','bị','vì','tại','hay',
+    'hoặc','như','nhưng','cũng','vào','lên','rằng','lại','sau',
+    'trước','qua','hơn','đây','ở','cùng','bởi','chỉ','đang',
+    'sẽ','nên','phải','vẫn','đều','rất','nữa','thêm','giữa',
+    'đi','lúc','nay','xem','tuy','dù','mới','còn','gì','ai',
+    'nào','sao','thế','hội','tôi','bạn','anh','chị','ông','bà',
+])
+
+def clean_text(text):
+    if not isinstance(text, str) or len(text.strip()) == 0:
+        return ""
+    text = unicodedata.normalize('NFC', text).lower()
+    text = re.sub(r'http\S+|www\S+|<[^>]+>|\S+@\S+|[^\w\s]|\d+', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    try:
+        from underthesea import word_tokenize
+        text = word_tokenize(text, format='text')
+    except Exception:
+        pass
+    tokens = [t for t in text.split() if t not in STOPWORDS and len(t) > 1]
+    return ' '.join(tokens)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# --- Load lại model đã train ---
-print('⏳ Đang load model...')
+# 1. Load model
+print(f'⏳ Đang nạp model từ {MODEL_PATH} trên {device}...')
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH).to(device)
 model.eval()
-print('✅ Load model xong!')
+print('✅ Nạp model thành công!')
 
-# --- Tái tạo LẠI đúng tập test (dùng cùng random_state=42 như lúc train) ---
-df = pd.read_csv(DATA_PATH, encoding='utf-8-sig')
-X = df['text_clean'].values
-y_id = df['label_id'].values
+# 2. Xác định file dữ liệu khả dụng
+data_sources = [
+    'data/processed/data_clean.csv',
+    'data/test_balanced_5500.csv',
+    'data/test_quick_550.csv'
+]
+data_path = None
+for p in data_sources:
+    if os.path.exists(p):
+        data_path = p
+        break
 
-X_train, X_temp, yid_train, yid_temp = train_test_split(
-    X, y_id, test_size=0.30, stratify=y_id, random_state=42
-)
-X_val, X_test, yid_val, yid_test = train_test_split(
-    X_temp, yid_temp, test_size=0.50, stratify=yid_temp, random_state=42
-)
-print(f'✅ Tái tạo tập test: {len(X_test)} mẫu (phải khớp số lượng lúc train)')
+if not data_path:
+    raise FileNotFoundError("Không tìm thấy file dữ liệu nào trong data/ để vẽ biểu đồ.")
 
-# --- Dataset + DataLoader cho tập test ---
+print(f'📖 Đang đọc dữ liệu từ: {data_path}')
+df = pd.read_csv(data_path)
+
+if 'text_clean' in df.columns:
+    X_raw = df['text_clean'].values
+else:
+    print('⏳ Đang tiền xử lý văn bản...')
+    X_raw = [clean_text(t) for t in df['text'].values]
+
+y_id = df['label_id'].values if 'label_id' in df.columns else df['label'].values
+
+# Lấy tập test
+if len(X_raw) > 2000:
+    _, X_test, _, y_test = train_test_split(X_raw, y_id, test_size=0.2, stratify=y_id, random_state=42)
+else:
+    X_test, y_test = X_raw, y_id
+
+print(f'✅ Tập đánh giá gồm: {len(X_test)} mẫu.')
+
+# 3. Dataset & DataLoader
 class VNTextDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer):
-        self.texts, self.labels, self.tok = texts, labels, tokenizer
+    def __init__(self, texts, labels):
+        self.texts = texts
+        self.labels = labels
     def __len__(self): return len(self.texts)
     def __getitem__(self, idx):
         return {'text': str(self.texts[idx]), 'label': int(self.labels[idx])}
 
 def collate_fn(batch):
-    texts  = [b['text'] for b in batch]
+    texts = [b['text'] for b in batch]
     labels = torch.tensor([b['label'] for b in batch], dtype=torch.long)
     enc = tokenizer(texts, max_length=MAX_LEN, padding=True, truncation=True, return_tensors='pt')
     enc['labels'] = labels
     return enc
 
-test_loader = DataLoader(VNTextDataset(X_test, yid_test, tokenizer),
-                          batch_size=BATCH_SIZE, collate_fn=collate_fn)
+test_loader = DataLoader(VNTextDataset(X_test, y_test), batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
-# --- Dự đoán trên tập test ---
-def evaluate(loader):
-    preds, trues = [], []
-    with torch.no_grad():
-        for batch in loader:
-            out = model(input_ids=batch['input_ids'].to(device),
-                        attention_mask=batch['attention_mask'].to(device))
-            preds += torch.argmax(out.logits, dim=1).cpu().tolist()
-            trues += batch['labels'].tolist()
-    return np.array(preds), np.array(trues)
+# 4. Dự đoán
+preds, trues = [], []
+with torch.no_grad():
+    for batch in test_loader:
+        out = model(input_ids=batch['input_ids'].to(device), attention_mask=batch['attention_mask'].to(device))
+        preds += torch.argmax(out.logits, dim=1).cpu().tolist()
+        trues += batch['labels'].tolist()
 
-print('⏳ Đang dự đoán trên tập test...')
-test_preds, test_true = evaluate(test_loader)
-print('✅ Xong!')
+test_preds = np.array(preds)
+test_true = np.array(trues)
 
 os.makedirs('results', exist_ok=True)
 
 print('\n' + '='*55)
-print(' KẾT QUẢ TRÊN TẬP TEST')
+print(' KẾT QUẢ ĐÁNH GIÁ TRÊN TẬP TEST')
 print('='*55)
 print(f'Accuracy: {accuracy_score(test_true, test_preds):.4f}\n')
-print(classification_report(test_true, test_preds, target_names=LABEL_VI))
+print(classification_report(test_true, test_preds, target_names=LABEL_VI, digits=4))
 
-# --- Biểu đồ Precision/Recall/F1 theo từng chủ đề ---
+# 5. Vẽ Confusion Matrix
+cm = confusion_matrix(test_true, test_preds)
+cm_norm = cm.astype(float) / cm.sum(axis=1)[:, np.newaxis]
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=LABEL_VI, yticklabels=LABEL_VI, ax=axes[0])
+axes[0].set_title('Confusion Matrix (Số lượng)')
+axes[0].tick_params(axis='x', rotation=45)
+
+sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='YlOrRd', xticklabels=LABEL_VI, yticklabels=LABEL_VI, ax=axes[1])
+axes[1].set_title('Confusion Matrix (Tỷ lệ %)')
+axes[1].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.savefig('results/confusion_matrix.png', dpi=150)
+plt.close()
+print('💾 Đã lưu: results/confusion_matrix.png')
+
+# 6. Biểu đồ Precision / Recall / F1 từng lớp
 precision_pc, recall_pc, f1_pc, _ = precision_recall_fscore_support(
     test_true, test_preds, labels=range(len(LABEL_VI)), zero_division=0
 )
-acc_overall = accuracy_score(test_true, test_preds)
-precision_w, recall_w, f1_w, _ = precision_recall_fscore_support(
-    test_true, test_preds, average='weighted', zero_division=0
-)
-
 x = np.arange(len(LABEL_VI))
 width = 0.25
 fig, ax = plt.subplots(figsize=(14, 6))
 ax.bar(x - width, precision_pc, width, label='Precision', color='#4C72B0')
-ax.bar(x,          recall_pc,    width, label='Recall',    color='#55A868')
-ax.bar(x + width,  f1_pc,        width, label='F1-score',  color='#C44E52')
-ax.set_xticks(x); ax.set_xticklabels(LABEL_VI, rotation=30, ha='right')
-ax.set_ylim(0, 1.05); ax.set_ylabel('Điểm số')
+ax.bar(x, recall_pc, width, label='Recall', color='#55A868')
+ax.bar(x + width, f1_pc, width, label='F1-score', color='#C44E52')
+ax.set_xticks(x)
+ax.set_xticklabels(LABEL_VI, rotation=30, ha='right')
+ax.set_ylim(0, 1.05)
+ax.set_ylabel('Điểm số')
 ax.set_title('Precision / Recall / F1-score theo từng chủ đề')
-ax.legend(); ax.grid(axis='y', alpha=0.3)
-plt.tight_layout(); plt.savefig('results/metrics_per_class.png', dpi=150); plt.show()
-
-# --- Biểu đồ tổng hợp Accuracy/Precision/Recall/F1 ---
-metric_names  = ['Accuracy', 'Precision', 'Recall', 'F1-score']
-metric_values = [acc_overall, precision_w, recall_w, f1_w]
-fig, ax = plt.subplots(figsize=(7, 5))
-bars = ax.bar(metric_names, metric_values, color=['#4C72B0', '#DD8452', '#55A868', '#C44E52'])
-ax.set_ylim(0, 1.05); ax.set_ylabel('Điểm số')
-ax.set_title('Kết quả tổng hợp trên tập Test (Weighted Average)')
+ax.legend()
 ax.grid(axis='y', alpha=0.3)
-for bar, val in zip(bars, metric_values):
-    ax.text(bar.get_x()+bar.get_width()/2, val+0.02, f'{val:.4f}', ha='center', fontweight='bold')
-plt.tight_layout(); plt.savefig('results/metrics_summary.png', dpi=150); plt.show()
-
-# --- Confusion Matrix ---
-cm = confusion_matrix(test_true, test_preds)
-cm_norm = cm.astype(float) / cm.sum(axis=1)[:, np.newaxis]
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=LABEL_VI, yticklabels=LABEL_VI, ax=axes[0])
-axes[0].set_title('Confusion Matrix (Số lượng)')
-sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='YlOrRd', xticklabels=LABEL_VI, yticklabels=LABEL_VI, ax=axes[1])
-axes[1].set_title('Confusion Matrix (Tỷ lệ %)')
-plt.tight_layout(); plt.savefig('results/confusion_matrix.png', dpi=150); plt.show()
-
-# --- Biểu đồ Loss/Accuracy theo epoch — lấy từ checkpoint.pt (không cần train lại) ---
-if os.path.exists('models/checkpoint.pt'):
-    ckpt = torch.load('models/checkpoint.pt', map_location='cpu')
-    df_hist = pd.DataFrame(ckpt['history'])
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].plot(df_hist['epoch'], df_hist['train_loss'], marker='o', color='coral')
-    axes[0].set_title('Train Loss theo Epoch')
-
-    axes[1].plot(df_hist['epoch'], df_hist['train_acc'], marker='o', label='Train', color='steelblue')
-    axes[1].plot(df_hist['epoch'], df_hist['test_acc'], marker='s', label='Test', color='darkorange')
-    axes[1].set_title('Accuracy theo Epoch (Train vs Test)'); axes[1].legend()
-    plt.tight_layout(); plt.savefig('results/training_history.png', dpi=150); plt.show()
-    print(f"\nBest Val Accuracy đã lưu: {ckpt['best_val_acc']:.4f}")
-else:
-    print('⚠️ Không tìm thấy checkpoint.pt — bỏ qua biểu đồ Loss/Accuracy theo epoch')
+plt.tight_layout()
+plt.savefig('results/metrics_per_class.png', dpi=150)
+plt.close()
+print('💾 Đã lưu: results/metrics_per_class.png')
+print('🎉 Hoàn tất toàn bộ biểu đồ!')
